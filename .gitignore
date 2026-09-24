@@ -1,0 +1,24 @@
+﻿# Data (large files - do not commit)
+sleep-edf-database-expanded-1.0.0/
+processed_4ch/
+processed_5ch/
+processed_test/
+processed/
+*.edf
+*.npz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
