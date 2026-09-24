@@ -17,10 +17,10 @@ way for each user/record, not just a global plot.
 
 How it works (without data leakage):
 ------------------------------------
-Exactly like train_model.py, we use GroupKFold on subject_id. For each fold,
-we train the model on the train split and compute SHAP values on the test
-split (unseen data) -- meaning SHAP for each record comes from a model that
-never saw that subject during training, exactly like out-of-fold predictions.
+Exactly like train_model.py, we use GroupKFold on subject_id and pass the same
+per-record sample weights to each fold's model. For each fold, we train on the
+train split and compute SHAP values on the test split (unseen data) -- meaning
+SHAP for each record comes from a weighted model that never saw that subject.
 
 Input:
     processed_4ch/features.csv
@@ -40,6 +40,7 @@ Usage:
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +77,10 @@ def get_feature_groups(feature_cols):
         "eeg2_eog": eeg2 + eog,
         "eeg1_emg": eeg1 + emg,
         "eeg2_emg": eeg2 + emg,
+        "eeg1_eeg2_eog": eeg1 + eeg2 + eog,
+        "eeg1_eeg2_emg": eeg1 + eeg2 + emg,
+        "eeg1_eog_emg": eeg1 + eog + emg,
+        "eeg2_eog_emg": eeg2 + eog + emg,
     }
 
 
@@ -91,7 +96,7 @@ def make_model():
 # ----------------------------------------------------------------------
 # Compute SHAP out-of-fold (no data leakage)
 # ----------------------------------------------------------------------
-def compute_oof_shap(X, y, groups, feature_cols):
+def compute_oof_shap(X, y, groups, feature_cols, sample_weights):
     """
     For each fold, train the model and return SHAP values of the test records
     of that fold. Final output: SHAP matrix with the same length as X, where
@@ -109,7 +114,7 @@ def compute_oof_shap(X, y, groups, feature_cols):
         y_tr = y.iloc[tr_idx]
 
         model = make_model()
-        model.fit(X_tr, y_tr)
+        model.fit(X_tr, y_tr, sample_weight=sample_weights[tr_idx])
 
         explainer = shap.TreeExplainer(model)
         sv = explainer.shap_values(X_te)
@@ -147,13 +152,47 @@ def main():
                               'Default: best model according to model_results.csv')
     parser.add_argument("--top_n_plot", type=int, default=15,
                          help="Number of top features in the plots")
+    parser.add_argument("--telemetry_weight", type=float, default=None,
+                        help="Telemetry sample weight; defaults to the latest training metadata.")
+    parser.add_argument("--cassette_weight", type=float, default=None,
+                        help="Cassette sample weight; defaults to the latest training metadata.")
+    parser.add_argument("--only_telemetry", action="store_true", default=None,
+                        help="Explain telemetry-only data; must match the training run.")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
+    training_config = {}
+    metadata_path = input_dir / "target_metadata.json"
+    if metadata_path.exists():
+        with open(metadata_path, encoding="utf-8") as f:
+            training_config = json.load(f).get("training_configuration", {})
+    if not training_config and (
+        args.telemetry_weight is None or args.cassette_weight is None
+    ):
+        raise FileNotFoundError(
+            "No training_configuration found. Re-run train_model.py first, or pass both "
+            "--telemetry_weight and --cassette_weight to reproduce the training run."
+        )
+
+    telemetry_weight = (
+        args.telemetry_weight if args.telemetry_weight is not None
+        else training_config.get("telemetry_weight", 1.0)
+    )
+    cassette_weight = (
+        args.cassette_weight if args.cassette_weight is not None
+        else training_config.get("cassette_weight", 1.0)
+    )
+    only_telemetry = (
+        args.only_telemetry if args.only_telemetry is not None
+        else training_config.get("only_telemetry", False)
+    )
     feats = pd.read_csv(input_dir / "features.csv")
     sq = pd.read_csv(input_dir / "sleep_quality.csv")
     df = feats.merge(sq[["record_id", "sleep_quality_score"]], on="record_id", how="inner")
+    if only_telemetry:
+        df = df[df["session"] == "telemetry"].reset_index(drop=True)
     print(f"Merged records: {len(df)}  |  Unique subjects: {df['subject_id'].nunique()}")
+    print(f"Training weights reproduced: cassette={cassette_weight}, telemetry={telemetry_weight}")
 
     feature_cols_all = [c for c in feats.columns
                          if c not in ("record_id", "subject_id", "night", "session")]
@@ -165,8 +204,12 @@ def main():
             raise ValueError(f"Group '{args.feature_group}' not found. Options: {list(groups_map)}")
         chosen = args.feature_group
     else:
+        trained_group = training_config.get("selected_feature_group")
         results_path = input_dir / "model_results.csv"
-        if results_path.exists():
+        if trained_group in groups_map:
+            chosen = trained_group
+            print(f"Feature group from training metadata: {chosen}")
+        elif results_path.exists():
             results = pd.read_csv(results_path).sort_values("MAE")
             chosen = results.iloc[0]["model"]
             print(f"Best model according to model_results.csv: {chosen}")
@@ -180,9 +223,14 @@ def main():
     X = df
     y = df["sleep_quality_score"]
     groups = df["subject_id"]
+    sample_weights = np.where(
+        df["session"].values == "telemetry", telemetry_weight, cassette_weight
+    )
 
     print("\nComputing SHAP out-of-fold (no data leakage)...")
-    shap_matrix, base_values, oof_preds = compute_oof_shap(X, y, groups, feature_cols)
+    shap_matrix, base_values, oof_preds = compute_oof_shap(
+        X, y, groups, feature_cols, sample_weights
+    )
 
     # ---- Global feature importance ----
     mean_abs_shap = np.mean(np.abs(shap_matrix), axis=0)
@@ -202,6 +250,8 @@ def main():
     per_record.insert(3, "actual_sqs", df["sleep_quality_score"].values)
     per_record.insert(4, "predicted_sqs_oof", oof_preds)
     per_record.insert(5, "base_value", base_values)
+    per_record.insert(6, "telemetry_weight", telemetry_weight)
+    per_record.insert(7, "cassette_weight", cassette_weight)
     per_record.to_csv(input_dir / "shap_per_record.csv", index=False)
 
     # ---- Save full matrix for use in app.py ----

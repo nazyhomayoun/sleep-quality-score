@@ -1,8 +1,13 @@
 """
 build_sleep_quality.py
 ======================
-Computes a Sleep Quality Score (SQS) per recording from the epoch-level metadata
-produced by build_sleep_dataset.py.
+Computes a PSG-derived Sleep Architecture Score (SQS) per recording from the
+epoch-level hypnogram metadata produced by build_sleep_dataset.py.
+
+SQS is a constructed research target: a weighted index of sleep efficiency,
+stage composition, wake after sleep onset, sleep-onset latency, and
+fragmentation. It is not a patient-reported outcome, clinical diagnosis, or
+validated clinical sleep-quality scale.
 
 Strategy:
     Some cassette recordings contain sleep scattered across 20+ hours (naps,
@@ -305,6 +310,11 @@ def main():
             print(f"[{i}/{n_total}] processed {record_id}  SQS={metrics['sleep_quality_score']}")
 
     df = pd.DataFrame(rows)
+    # Preserve target provenance so downstream users do not mistake this
+    # constructed label for an independently measured clinical outcome.
+    df["target_name"] = "PSG-derived Sleep Architecture Score"
+    df["target_type"] = "hypnogram-derived composite index"
+    df["target_components"] = "SE,N3_pct,REM_pct,WASO_min,SOL_min,fragmentation_per_h"
     df.to_csv(output_csv, index=False)
 
     print("\n========== Summary ==========")

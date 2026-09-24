@@ -1,13 +1,14 @@
 """
 app.py
 ======
-Streamlit demo for Sleep Quality Score (SQS) prediction.
+Streamlit demo for PSG-derived Sleep Architecture Score (SQS) estimation.
 
 Run:
     streamlit run app.py
 """
 
 from pathlib import Path
+import json
 
 import numpy as np
 import pandas as pd
@@ -35,7 +36,7 @@ STAGE_COLORS = {
 # Page config
 # ----------------------------------------------------------------------
 st.set_page_config(
-    page_title="Sleep Quality Score",
+    page_title="PSG-derived Sleep Architecture Score",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -52,7 +53,12 @@ def load_data():
     features = pd.read_csv(INPUT_DIR / "features.csv")
     preds = pd.read_csv(INPUT_DIR / "best_model_predictions.csv")
     imp = pd.read_csv(INPUT_DIR / "feature_importance.csv")
-    return metadata, quality, features, preds, imp
+    metadata_path = INPUT_DIR / "target_metadata.json"
+    training_config = {}
+    if metadata_path.exists():
+        with open(metadata_path, encoding="utf-8") as f:
+            training_config = json.load(f).get("training_configuration", {})
+    return metadata, quality, features, preds, imp, training_config
 
 
 # ----------------------------------------------------------------------
@@ -68,10 +74,10 @@ def sqs_color(score):
 
 def sqs_label(score):
     if score >= 75:
-        return "GOOD"
+        return "HIGHER DERIVED SCORE"
     elif score >= 55:
-        return "FAIR"
-    return "POOR"
+        return "MID-RANGE DERIVED SCORE"
+    return "LOWER DERIVED SCORE"
 
 
 def render_score_card(actual, predicted):
@@ -88,7 +94,7 @@ def render_score_card(actual, predicted):
             margin-bottom: 16px;
         ">
             <div style="font-size: 16px; color: #555; margin-bottom: 4px;">
-                Predicted Sleep Quality Score
+                Predicted PSG-derived Sleep Architecture Score
             </div>
             <div style="font-size: 64px; font-weight: bold; color: {color}; line-height: 1;">
                 {predicted:.1f}
@@ -97,7 +103,7 @@ def render_score_card(actual, predicted):
                 {label}
             </div>
             <div style="font-size: 14px; color: #777; margin-top: 12px;">
-                Actual SQS: <b>{actual:.1f}</b> &nbsp;|&nbsp;
+                Observed derived score: <b>{actual:.1f}</b> &nbsp;|&nbsp;
                 Absolute Error: <b>{abs(actual - predicted):.2f}</b> points
             </div>
         </div>
@@ -221,16 +227,22 @@ def plot_metrics_bars(row):
 # Main
 # ----------------------------------------------------------------------
 def main():
-    st.title("🧠 Sleep Quality Score Analyzer")
+    st.title("🧠 PSG-derived Sleep Architecture Score Analyzer")
     st.markdown(
-        "**Predicting sleep quality from a single EEG channel (Pz-Oz)**  \n"
+        "**Estimating a hypnogram-derived sleep-architecture index from a single EEG channel (Pz-Oz)**  \n"
         "Powered by LightGBM trained on the Sleep-EDF Expanded dataset"
+    )
+    st.warning(
+        "Research-use interpretation: SQS is a constructed index derived from the same "
+        "recording's PSG hypnogram (sleep efficiency, stages, WASO, SOL, and fragmentation). "
+        "It is not a clinical diagnosis, patient-reported sleep quality measure, or validated "
+        "medical decision score."
     )
     st.divider()
 
     # ---- Load data ----
     try:
-        metadata, quality, features, preds, imp = load_data()
+        metadata, quality, features, preds, imp, training_config = load_data()
     except FileNotFoundError as e:
         st.error(f"Missing data file: {e}")
         st.stop()
@@ -256,12 +268,15 @@ def main():
     record_id = st.sidebar.selectbox("Recording ID", available)
 
     st.sidebar.markdown("---")
+    selected_group = training_config.get("selected_feature_group", "unknown")
+    feature_count = len(imp)
+    telemetry_weight = training_config.get("telemetry_weight", "unknown")
     st.sidebar.markdown(
         "**Model info**\n\n"
         "- Model: LightGBM Regressor\n"
-        "- Features: 21 (EEG Pz-Oz only)\n"
+        f"- Feature group: {selected_group} ({feature_count} features)\n"
         "- Validation: GroupKFold on subject_id\n"
-        "- Domain adaptation: telemetry weight = 3"
+        f"- Domain adaptation: telemetry weight = {telemetry_weight}"
     )
 
     # ---- Get row data ----
@@ -303,8 +318,8 @@ def main():
     # ---- Feature importance ----
     st.subheader("What drove this prediction?")
     st.caption(
-        "The model relies mainly on **delta power** (deep sleep) and "
-        "**sigma power** (sleep spindles), both established markers of healthy sleep."
+        "Feature importance shows which signal descriptors were most useful for "
+        "estimating this PSG-derived index; it does not establish clinical causality."
     )
     st.plotly_chart(plot_feature_importance(imp, top_n=12), use_container_width=True)
 
@@ -315,7 +330,7 @@ def main():
                 "TIB (min)", "TST (min)", "SE (%)", "SOL (min)", "WASO (min)",
                 "N1 (%)", "N2 (%)", "N3 (%)", "REM (%)",
                 "Arousals", "Transitions", "Fragmentation / h",
-                "SQS (actual)", "SQS (predicted)",
+                "Derived SQS (observed)", "Derived SQS (predicted)",
             ],
             "Value": [
                 f"{qrow['TIB_min']:.1f}",

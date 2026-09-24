@@ -66,6 +66,41 @@ def cv_r2(X, y, groups, cols, sample_weights=None, params=None):
     return r2_score(y, preds)
 
 
+def nested_feature_selection_r2(X, y, groups, candidate_cols, top_ks,
+                                sample_weights=None, params=None):
+    """Evaluate top-K models with feature selection fit inside each CV fold."""
+    gkf = GroupKFold(n_splits=N_SPLITS)
+    predictions = {k: np.zeros(len(y)) for k in top_ks}
+    fold_importances = []
+
+    for tr, te in gkf.split(X, y, groups):
+        # Rank features using only the training partition for this fold.
+        selector = make_model(params)
+        if sample_weights is None:
+            selector.fit(X.iloc[tr][candidate_cols], y.iloc[tr])
+        else:
+            selector.fit(X.iloc[tr][candidate_cols], y.iloc[tr], sample_weight=sample_weights[tr])
+        importances = pd.Series(
+            selector.booster_.feature_importance(importance_type="gain"),
+            index=candidate_cols,
+        )
+        fold_importances.append(importances)
+        ranked_cols = importances.sort_values(ascending=False).index
+
+        for k in top_ks:
+            selected_cols = ranked_cols[:k].tolist()
+            model = make_model(params)
+            if sample_weights is None:
+                model.fit(X.iloc[tr][selected_cols], y.iloc[tr])
+            else:
+                model.fit(X.iloc[tr][selected_cols], y.iloc[tr], sample_weight=sample_weights[tr])
+            predictions[k][te] = model.predict(X.iloc[te][selected_cols])
+
+    mean_importances = pd.DataFrame(fold_importances).mean().sort_values(ascending=False)
+    scores = {k: r2_score(y, preds) for k, preds in predictions.items()}
+    return scores, mean_importances
+
+
 # ----------------------------------------------------------------------
 # Cross-session R² (train one session, test the other)
 # ----------------------------------------------------------------------
@@ -156,9 +191,11 @@ def main():
     print("\n" + "=" * 70)
     print(" 3. COMBINED (cassette + telemetry)")
     print("=" * 70)
+    combined_scores = {}
     for w in [1.0, 2.0, 3.0, 5.0, 8.0]:
         sw = np.where(session.values == "telemetry", w, 1.0)
         r2 = cv_r2(X, y, groups, eeg2_cols, sample_weights=sw)
+        combined_scores[w] = r2
         print(f"  telemetry_weight = {w:.1f}        R² = {r2:.4f}")
 
     # ------------------------------------------------------------------
@@ -180,25 +217,23 @@ def main():
     print(f"  R² = {r2_tc:.4f}" if r2_tc is not None else "  Not enough data")
 
     # ------------------------------------------------------------------
-    # 6. Feature selection on full data
+    # 6. Nested feature selection
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
-    print(" 6. FEATURE SELECTION (all data, telemetry_weight=3)")
+    print(" 6. NESTED FEATURE SELECTION (all data, telemetry_weight=3)")
     print("=" * 70)
     sw = np.where(session.values == "telemetry", 3.0, 1.0)
 
-    # Get top features by LightGBM gain on full data
-    m = make_model(tuned)
-    m.fit(X[eeg2_cols], y, sample_weight=sw)
-    imps = pd.Series(
-        m.booster_.feature_importance(importance_type="gain"),
-        index=eeg2_cols,
-    ).sort_values(ascending=False)
+    top_ks = [5, 8, 10, 12, 15, 21]
+    top_k_r2, imps = nested_feature_selection_r2(
+        X, y, groups, eeg2_cols, top_ks, sample_weights=sw, params=tuned
+    )
 
-    for k in [5, 8, 10, 12, 15, 21]:
-        cols_k = imps.head(k).index.tolist()
-        r2 = cv_r2(X, y, groups, cols_k, sample_weights=sw, params=tuned)
-        print(f"  Top {k:2d} features           R² = {r2:.4f}")
+    print("  Mean training-fold feature gain:")
+    for i, (feat, imp) in enumerate(imps.head(15).items(), 1):
+        print(f"    {i:2d}. {feat:35s} {imp:10.0f}")
+    for k in top_ks:
+        print(f"  Top {k:2d} features           R² = {top_k_r2[k]:.4f}")
 
     # ------------------------------------------------------------------
     # Summary
@@ -210,7 +245,8 @@ def main():
     print(f"  Cassette only (best)             R² = {max(r2_c_all, r2_c_clean, r2_c_tuned, r2_c_both):.4f}")
     print(f"  Telemetry only (all feat)        R² = {r2_t_all:.4f}")
     print(f"  Telemetry only (tuned)           R² = {r2_t_tuned:.4f}")
-    print(f"  Combined (best weight)           R² = ???")
+    best_weight = max(combined_scores, key=combined_scores.get)
+    print(f"  Combined (best weight={best_weight:.1f}) R² = {combined_scores[best_weight]:.4f}")
     print(f"  Cross: cassette → telemetry      R² = {r2_ct:.4f}" if r2_ct else "")
     print(f"  Cross: telemetry → cassette      R² = {r2_tc:.4f}" if r2_tc else "")
 

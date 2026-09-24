@@ -39,6 +39,35 @@ def get_r2(X, y, groups, feature_cols):
     return r2_score(y, preds)
 
 
+def nested_feature_selection_r2(X, y, groups, candidate_cols, top_ks):
+    """Evaluate top-K models with feature selection fit inside each CV fold."""
+    gkf = GroupKFold(n_splits=N_SPLITS)
+    predictions = {k: np.zeros(len(y)) for k in top_ks}
+    fold_importances = []
+
+    for tr_idx, te_idx in gkf.split(X, y, groups):
+        # Rank features with training subjects only; held-out subjects cannot
+        # influence either importance scores or the selected feature set.
+        selector = make_model()
+        selector.fit(X.iloc[tr_idx][candidate_cols], y.iloc[tr_idx])
+        importances = pd.Series(
+            selector.booster_.feature_importance(importance_type="gain"),
+            index=candidate_cols,
+        )
+        fold_importances.append(importances)
+        ranked_cols = importances.sort_values(ascending=False).index
+
+        for k in top_ks:
+            selected_cols = ranked_cols[:k].tolist()
+            model = make_model()
+            model.fit(X.iloc[tr_idx][selected_cols], y.iloc[tr_idx])
+            predictions[k][te_idx] = model.predict(X.iloc[te_idx][selected_cols])
+
+    mean_importances = pd.DataFrame(fold_importances).mean().sort_values(ascending=False)
+    scores = {k: r2_score(y, preds) for k, preds in predictions.items()}
+    return scores, mean_importances
+
+
 def main():
     feats = pd.read_csv(INPUT_DIR / "features.csv")
     sq = pd.read_csv(INPUT_DIR / "sleep_quality.csv")
@@ -62,23 +91,17 @@ def main():
     r2_all = get_r2(X, y, groups, eeg2_cols)
     print(f"All 21 eeg2 features : R² = {r2_all:.4f}")
 
-    # Feature selection by LightGBM importance
-    model = make_model()
-    model.fit(X[eeg2_cols], y)
-    imps = pd.Series(
-        model.booster_.feature_importance(importance_type="gain"),
-        index=eeg2_cols,
-    ).sort_values(ascending=False)
+    # Select features separately within each GroupKFold training split.
+    top_ks = [3, 5, 8, 10, 12, 15]
+    top_k_r2, imps = nested_feature_selection_r2(X, y, groups, eeg2_cols, top_ks)
 
-    print("\nTop features by gain:")
+    print("\nTop features by mean training-fold gain:")
     for i, (feat, imp) in enumerate(imps.head(15).items(), 1):
         print(f"  {i:2d}. {feat:35s} {imp:10.0f}")
 
-    print("\nR² with top-K features:")
-    for k in [3, 5, 8, 10, 12, 15]:
-        cols = imps.head(k).index.tolist()
-        r2 = get_r2(X, y, groups, cols)
-        print(f"  Top {k:2d}: R² = {r2:.4f}")
+    print("\nNested GroupKFold R² with top-K features:")
+    for k in top_ks:
+        print(f"  Top {k:2d}: R² = {top_k_r2[k]:.4f}")
 
 
 if __name__ == "__main__":

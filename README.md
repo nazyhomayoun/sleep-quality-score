@@ -1,6 +1,6 @@
-# Sleep Quality Score (SQS)
+# PSG-derived Sleep Architecture Score (SQS)
 
-AI-powered sleep quality scoring from physiological signals — built for the
+AI-powered estimation of a PSG-derived sleep-architecture index from physiological signals — built for the
 5th AI Factory Iran Hackathon ("Karkhooneh").
 
 Dataset: [Sleep-EDF Database Expanded](https://physionet.org/content/sleep-edfx/1.0.0/) — PhysioNet
@@ -60,16 +60,23 @@ python build_sleep_dataset.py \
     --output_dir "processed_4ch" \
     --channels "EEG Fpz-Cz" "EEG Pz-Oz" "EOG horizontal" "EMG submental"
 
-# 2) Compute the Sleep Quality Score for every recording
+# 2) Compute the PSG-derived Sleep Architecture Score for every recording
 python build_sleep_quality.py --input_dir "processed_4ch"
 
 # 3) Extract signal features per recording
 python extract_features.py --input_dir "processed_4ch"
 
-# 4) Train and compare models (multi-channel reference vs. single-channel)
-python train_model.py --input_dir "processed_4ch" --telemetry_weight 3
+# 4) Optional: tune and evaluate the EEG Pz-Oz LightGBM experiment with nested
+#    GroupKFold (outer-test R² is the valid tuning-aware performance estimate)
+python tune_lightgbm.py --input_dir "processed_4ch" --telemetry_weights 3 5
 
-# 5) Run the demo
+# 5) Train and compare the predefined multi-channel and single-channel models
+python train_model.py --input_dir "processed_4ch"
+
+# 6) Create out-of-fold SHAP explanations with the same saved sample weights
+python explain_shap.py --input_dir "processed_4ch"
+
+# 7) Run the demo
 streamlit run app.py
 ```
 
@@ -86,16 +93,44 @@ streamlit run app.py
 
 ## Model design
 
+`train_model.py` evaluates every one-, two-, three-, and four-channel
+combination of the two EEG, EOG, and EMG channels. Read the winning channel
+count from a regenerated `model_results.csv`; do not infer it from a separate
+classification experiment.
+
 - **Reference model (multi-channel):** all 4 channels (2x EEG + EOG + EMG)
 - **Single-channel model:** `EEG Pz-Oz` or `EEG Fpz-Cz` only — directly
   comparable to the reference model since both come from the same
   feature-extraction pipeline and the same split
 - **Validation:** GroupKFold (5 folds) on `subject_id` — no single person
   ever appears in both train and test
-- **Metrics:** MAE, RMSE, R², Spearman, Pearson, CCC, clinical accuracy
-  (±10 points), Bland-Altman
+- **Hyperparameter tuning:** nested GroupKFold — parameters are selected in
+  inner folds and reported performance comes only from untouched outer-test
+  subjects. Do not report the inner-CV tuning score as final performance.
+- **Metrics:** MAE, RMSE, R², Spearman, Pearson, CCC, score accuracy within
+  ±10 points (a descriptive tolerance metric), Bland-Altman
 
-## Known limitation (important for Q&A)
+## Scientific scope and limitations (important for Q&A)
+
+**What the target means.** SQS is a researcher-defined, PSG-derived index: it
+combines sleep efficiency, N3%, REM%, WASO, sleep-onset latency, and
+fragmentation computed from the scored hypnogram. It is not a clinical
+diagnosis, a validated clinical sleep-quality instrument, or a patient-reported
+outcome such as PSQI.
+
+**How to interpret model performance.** An R² of 0.50 means the signal
+features explain approximately 50% of variation in this derived SQS under the
+stated subject-wise validation. It does **not** mean “50% clinical accuracy”
+and cannot establish that the model predicts perceived or clinical sleep
+quality. Since both the target and EEG features come from the same PSG study,
+the experiment should be presented as estimation of a hypnogram-derived sleep
+architecture index.
+
+**What is required for a clinical claim.** Validate prospectively on an
+independent cohort with an outcome collected independently from PSG staging
+(for example, PSQI, insomnia severity, clinician assessment, or a prespecified
+clinical endpoint). Refit and evaluate against that outcome with subject-wise
+external validation.
 
 The "main sleep session" window (`sleep_start_epoch` / `sleep_end_epoch`)
 is currently located using the **full** hypnogram — meaning even the
@@ -110,10 +145,11 @@ in the current MVP.
 | File | Role |
 |---|---|
 | `build_sleep_dataset.py` | Read PSG+Hypnogram → labeled epochs |
-| `build_sleep_quality.py` | Compute the Sleep Quality Score |
+| `build_sleep_quality.py` | Compute the PSG-derived Sleep Architecture Score |
 | `extract_features.py` | Extract spectral/Hjorth features from raw signal |
 | `train_model.py` | Train, compare models, report metrics |
 | `app.py` | Streamlit demo |
+| `target_metadata.json` | Machine-readable target definition generated during training |
 | `split_dataset.py` | Standalone group-split example (already integrated into build_sleep_dataset) |
 
 ## Team
